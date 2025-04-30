@@ -2,6 +2,8 @@ import { useEffect, useState } from 'react';
 import { useStore } from '../states/store';
 import axios from 'axios';
 import BaselineChart from './BaselineChart';
+import CandlestickChart from './CandlestickChart';
+import LineChart from './LineChart';
 
 const PriceChart = () => {
   console.log('PriceChart rendered');
@@ -10,70 +12,110 @@ const PriceChart = () => {
   const [historicalTicks, setHistoricalTicks] = useState([]);
   const [historicalBaseline, setHistoricalBaseline] = useState(null);
 
-  useEffect(() => {
-    const fetchHistoricalData = async () => {
-      try {
-        let ticks = [];
-        const cachedTicks = JSON.parse(localStorage.getItem('historicalTicks') || '[]');
-        if (cachedTicks.length > 0) {
-          console.log('Using cached historical ticks:', cachedTicks);
-          ticks = cachedTicks;
-        } else {
-          console.log('Fetching historical ticks from Binance...');
-          const endTime = Date.now();
-          const response = await axios.get('https://api.binance.com/api/v3/klines', {
-            params: {
-              symbol: 'BTCUSDT',
-              interval: '1m', // Using 1-minute interval
-              limit: 1000,
-              endTime: endTime,
-            },
-          });
+  const fetchHistoricalData = async () => {
+    try {
+      console.log('Fetching historical trades from Binance...');
+      const currentTimeMs = Date.now();
+      const endTime = currentTimeMs;
+      const startTime = endTime - (600 * 1000); // Last 10 minutes (600 seconds)
+      const startTimeS = Math.floor(startTime / 1000);
 
-          console.log('Raw response from Binance:', response.data);
+      let allTicks = [];
+      let lastId = null;
+      let earliestTime = currentTimeMs / 1000;
 
-          if (!response.data || response.data.length === 0) {
-            console.warn('No historical data returned from Binance');
-            return;
-          }
+      while (earliestTime > startTimeS) {
+        const response = await axios.get('https://api.binance.com/api/v3/historicalTrades', {
+          params: {
+            symbol: 'BTCUSDT',
+            limit: 100,
+            fromId: lastId || undefined,
+          },
+        });
 
-          ticks = response.data.map(kline => {
-            const time = Math.floor(kline[0] / 1000);
-            const value = parseFloat(kline[4]);
-            return { time, value };
-          });
+        console.log('Raw response from Binance historicalTrades:', response.data);
 
-          console.log('Historical ticks from Binance:', ticks);
-          localStorage.setItem('historicalTicks', JSON.stringify(ticks));
+        if (!response.data || response.data.length === 0) {
+          console.warn('No historical trade data returned from Binance');
+          break;
         }
 
-        if (ticks.length === 0) {
-          console.warn('No historical ticks available after fetching');
-          return;
-        }
+        const ticks = response.data
+          .map((trade, index) => {
+            if (!trade || typeof trade.time !== 'number' || typeof trade.price !== 'string') {
+              console.error(`Invalid trade data at index ${index}:`, trade);
+              throw new Error('Invalid trade data format');
+            }
+            const time = Math.floor(trade.time / 1000);
+            const value = parseFloat(trade.price);
+            if (isNaN(time) || isNaN(value)) {
+              console.error(`Invalid time or value at index ${index}: time=${time}, value=${value}`);
+              throw new Error('Invalid time or value in trade data');
+            }
+            return { time, value, tradeId: trade.id };
+          });
 
-        setHistoricalTicks(ticks);
-        const baseline = ticks.length > 0 ? ticks[ticks.length - 1].value : 0;
-        setHistoricalBaseline(baseline);
-        console.log('Historical baseline set to:', baseline);
-      } catch (error) {
-        console.error('Error fetching historical ticks from Binance:', error.message);
-        if (error.response) {
-          console.error('Error response:', error.response.data);
+        allTicks = [...allTicks, ...ticks];
+        lastId = ticks[0].tradeId;
+        earliestTime = ticks[0].time;
+
+        if (ticks.length < 1000) {
+          break;
         }
       }
-    };
 
+      const timeWindowStart = Math.floor(startTime / 1000);
+      const filteredTicks = allTicks
+        .filter(tick => tick.time >= timeWindowStart)
+        .map(({ time, value }) => ({ time, value }));
+
+      console.log('Historical ticks from Binance trades:', filteredTicks);
+      localStorage.setItem('historicalTicks', JSON.stringify(filteredTicks));
+
+      if (filteredTicks.length === 0) {
+        console.warn('No historical ticks available after filtering');
+        return;
+      }
+
+      setHistoricalTicks(filteredTicks);
+      const baseline = filteredTicks.length > 0 ? filteredTicks[filteredTicks.length - 1].value : 0;
+      setHistoricalBaseline(baseline);
+      console.log('Historical baseline set to:', baseline);
+    } catch (error) {
+      console.error('Error in fetchHistoricalData:', error.message);
+      if (error.response) {
+        console.error('Error response:', error.response.data);
+      }
+    }
+  };
+
+  useEffect(() => {
     fetchHistoricalData();
+    const intervalId = setInterval(() => {
+      console.log('Refetching historical data...');
+      fetchHistoricalData();
+    }, 5 * 1000);
+
+    return () => {
+      console.log('Cleaning up historical data fetch interval');
+      clearInterval(intervalId);
+    };
   }, []);
 
   return (
     <div className="p-6 flex-1">
-      <BaselineChart
+      {/* <BaselineChart
         chartData={chartData}
         historicalTicks={historicalTicks}
         historicalBaseline={historicalBaseline}
-      />
+      /> */}
+      <LineChart />
+      <div className="mt-6">
+        {/* <CandlestickChart
+          chartData={chartData}
+          historicalTicks={historicalTicks}
+        /> */}
+      </div>
     </div>
   );
 };

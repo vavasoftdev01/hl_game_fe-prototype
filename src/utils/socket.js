@@ -5,7 +5,7 @@ let socketInstance = null;
 
 const initSocket = () => {
   if (!socketInstance) {
-    socketInstance = io('http://localhost:1002/hl_price', {
+    socketInstance = io('http://localhost:8080/hl_price', {
       transports: ['websocket'],
       reconnectionDelay: 1000,
       reconnectionAttempts: 10,
