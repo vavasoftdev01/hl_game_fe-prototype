@@ -32,17 +32,17 @@ const LineChart = () => {
         try {
           chartInstance.current = createChart(chartRef.current, {
             width: chartRef.current.offsetWidth,
-            height: 300,
-            layout: { background: { color: '#25293a' }, textColor: '#e0e0e0' },
-            grid: { vertLines: { color: '#2d324d' }, horzLines: { color: '#2d324d' } },
+            height: 900,
+            layout: { background: { color: '#0d0a02' }, textColor: '#b660f7' },
+            grid: { vertLines: { color: '#0f0f0f' }, horzLines: { color: '#0f0f0f' } },
             timeScale: {
-              timeVisible: true,
-              secondsVisible: true,
+              timeVisible: false,
+              secondsVisible: false,
               tickMarkFormatter: (time, tickMarkType, locale) => {
                 const date = new Date(time * 1000); // Convert back to milliseconds for display
                 return `${date.toLocaleTimeString(locale, { hour: '2-digit', minute: '2-digit', second: '2-digit' })}.${date.getMilliseconds().toString().padStart(3, '0')}`;
               },
-              minBarSpacing: 0.5,
+              minBarSpacing: 2,
             },
             handleScroll: true,
             handleScale: true,

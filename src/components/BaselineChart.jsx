@@ -1,276 +1,364 @@
 import { useEffect, useRef, useState } from 'react';
 import { createChart } from 'lightweight-charts';
+import io from 'socket.io-client';
+import { useStore } from '../states/store';
 
-const BaselineChart = ({ chartData, historicalTicks, historicalBaseline }) => {
+const BaselineChart = () => {
   console.log('BaselineChart rendered');
 
-  const TICK_INTERVAL_MS = 1000; // 1000 ms (1 second)
-  const TICK_INTERVAL_S = TICK_INTERVAL_MS / 1000; // Convert to seconds
-  const MAX_TICKS = 500; // Number of ticks to display (500 seconds)
-  const TOTAL_TIME_SPAN_MS = TICK_INTERVAL_MS * MAX_TICKS; // 500,000 ms
-  const TOTAL_TIME_SPAN_S = TOTAL_TIME_SPAN_MS / 1000; // 500 seconds
+  const TICK_INTERVAL_MS = 1000; // 1 second interval for real-time updates
+  const TOTAL_TIME_SPAN_S = 100; // 100 seconds to match historical data range
 
   const chartRef = useRef(null);
   const chartInstance = useRef(null);
   const baselineSeries = useRef(null);
   const baselineLineSeries = useRef(null);
-  const baselineValue = useRef(historicalBaseline || 0);
   const isInitialized = useRef(false);
-  const [displayedTicks, setDisplayedTicks] = useState([]);
-  const [bufferedUpdates, setBufferedUpdates] = useState([]);
-  const lastUpdateInterval = useRef(null);
+  const [displayedData, setDisplayedData] = useState([]);
+  const [baselineData, setBaselineData] = useState([]);
+  const [currentPrice, setCurrentPrice] = useState(null);
+  const lastPointTime = useRef(null);
+  const socketRef = useRef(null);
+  const renderSync = useRef(0);
+
+  const { init } = useStore();
+
+  const backendApiUrl = import.meta.env.VITE_BACKEND_API_URL || 'http://localhost:1002';
+  const websocketUrl = import.meta.env.VITE_WEBSOCKET_URL || 'http://localhost:1002/hl_price';
+
+  const calculateBaseline = (data) => {
+    if (data.length < 5) {
+      console.log('Not enough data for baseline, need at least 5 points:', data);
+      setBaselineData([]);
+      return [];
+    }
+
+    const baseline = [];
+    for (let i = 0; i < data.length; i++) {
+      if (i < 4) continue;
+      const window = data.slice(i - 4, i + 1);
+      const avg = window.reduce((sum, point) => sum + point.value, 0) / 5;
+      baseline.push({ time: data[i].time, value: avg });
+    }
+    console.log('Calculated baseline:', baseline);
+    setBaselineData(baseline);
+    return baseline;
+  };
+
+  // Resize function for chart
+  const resize = () => {
+    if (chartInstance.current && chartRef.current) {
+      chartInstance.current.resize(chartRef.current.offsetWidth, 300);
+    }
+  };
 
   useEffect(() => {
-    console.log('BaselineChart setup useEffect triggered');
-    const setupChart = () => {
-      if (chartRef.current && !isInitialized.current) {
-        try {
-          console.log('Creating chart instance...');
-          chartInstance.current = createChart(chartRef.current, {
-            width: chartRef.current.offsetWidth,
-            height: 300,
-            layout: { background: { color: '#25293a' }, textColor: '#e0e0e0' },
-            grid: { vertLines: { color: '#2d324d' }, horzLines: { color: '#2d324d' } },
-            timeScale: { timeVisible: true, secondsVisible: true },
-            handleScroll: true,
-            handleScale: true,
-          });
+    console.log('Initializing store WebSocket listener...');
+    init();
+  }, [init]);
 
-          console.log('Adding baseline series...');
-          baselineSeries.current = chartInstance.current.addBaselineSeries({
-            baseValue: { price: baselineValue.current },
-            topFillColor1: 'rgba(76, 175, 80, 0.28)',
-            topFillColor2: 'rgba(76, 175, 80, 0.05)',
-            bottomFillColor1: 'rgba(239, 83, 80, 0.28)',
-            bottomFillColor2: 'rgba(239, 83, 80, 0.05)',
-            lineColor: '#00FFFF', // Cyan for all data
-            lineWidth: 2,
-          });
+  useEffect(() => {
+    if (chartRef.current && !isInitialized.current) {
+      try {
+        console.log('Initializing chart...');
+        chartInstance.current = createChart(chartRef.current, {
+          width: chartRef.current.offsetWidth,
+          height: 900,
+          layout: { background: { color: '#25293a' }, textColor: '#e0e0e0' },
+          grid: { vertLines: { color: '#2d324d' }, horzLines: { color: '#2d324d' } },
+          timeScale: {
+            timeVisible: true,
+            secondsVisible: true,
+            tickFormatter: (time) => {
+              const date = new Date(time * 1000);
+              date.setUTCHours(date.getUTCHours() + 9); // Convert to KST (UTC+9)
+              const month = (date.getUTCMonth() + 1).toString().padStart(2, '0');
+              const day = date.getUTCDate().toString().padStart(2, '0');
+              const hours = date.getUTCHours().toString().padStart(2, '0');
+              return `${month}-${day}:${hours}`; // Format as MM-DD:HH
+            },
+            fixLeftEdge: true,
+            fixRightEdge: true,
+          },
+          handleScroll: true,
+          handleScale: true,
+        });
 
-          console.log('Adding baseline line series...');
-          baselineLineSeries.current = chartInstance.current.addLineSeries({
-            color: '#FF0000',
-            lineWidth: 1,
-            lineStyle: 2, // Dashed line for baseline
-          });
+        baselineSeries.current = chartInstance.current.addBaselineSeries({
+          baseValue: { price: 0 },
+          topFillColor1: 'rgba(3, 252, 57, 0.56)',
+          topFillColor2: 'rgba(5, 205, 255, 0.04)',
+          bottomFillColor1: 'rgba(252, 3, 86, 0.56)',
+          bottomFillColor2: 'rgba(252, 3, 3, 0.04)',
+          lineColor: '#9403fc',
+          lineWidth: 3,
+          lastPriceAnimation: 1,
+          mismatchDirection: 1
+        });
 
-          const resize = () => {
-            if (chartInstance.current && chartRef.current) {
-              chartInstance.current.resize(chartRef.current.offsetWidth, 300);
-            }
-          };
-          window.addEventListener('resize', resize);
+        baselineLineSeries.current = chartInstance.current.addLineSeries({
+          color: 'rgba(3, 252, 57, 0.56)',
+          lineWidth: 0.1,
+          lineStyle: 2,
+        });
 
-          isInitialized.current = true;
-          console.log('Chart setup complete');
+        window.addEventListener('resize', resize);
 
-          return () => {
-            console.log('BaselineChart - Cleaning up chart');
-            window.removeEventListener('resize', resize);
-            if (chartInstance.current) {
-              chartInstance.current.remove();
-              chartInstance.current = null;
-              baselineSeries.current = null;
-              baselineLineSeries.current = null;
-              isInitialized.current = false;
-            }
-          };
-        } catch (error) {
-          console.error('BaselineChart - Error during chart setup:', error);
+        isInitialized.current = true;
+        console.log('Chart initialization complete');
+      } catch (error) {
+        console.error('Chart initialization error:', error);
+      }
+
+      return () => {
+        console.log('Cleaning up chart...');
+        window.removeEventListener('resize', resize);
+        if (chartInstance.current) {
+          chartInstance.current.remove();
+          chartInstance.current = null;
+          baselineSeries.current = null;
+          baselineLineSeries.current = null;
+          isInitialized.current = false;
         }
+      };
+    }
+  }, [chartRef]);
+
+  useEffect(() => {
+    if (!isInitialized.current || !chartInstance.current || !baselineSeries.current || !baselineLineSeries.current) {
+      console.log('Waiting for chart to be initialized...', {
+        isInitialized: isInitialized.current,
+        chartInstance: !!chartInstance.current,
+        baselineSeries: !!baselineSeries.current,
+        baselineLineSeries: !!baselineLineSeries.current,
+      });
+      return;
+    }
+
+    const initializeChart = async () => {
+      try {
+        const fetchHistoricalData = async () => {
+          const currentTimeMs = Date.now();
+          const endTime = currentTimeMs - 1000;
+          const startTime = endTime - (100 * 1000); // 100 seconds
+
+          console.log(`Fetching historical data: start=${startTime}, end=${endTime}`);
+
+          const response = await fetch(
+            `${backendApiUrl}/binance/historical?symbol=BTCUSDT&startTime=${startTime}&endTime=${endTime}&limit=200`
+          );
+          if (!response.ok) throw new Error('Failed to fetch historical data');
+          const candles = await response.json();
+
+          console.log('Historical data:', candles);
+
+          // Interpolate to 500ms intervals (100s / 200 ticks = 500ms per tick)
+          const interpolatedData = [];
+          if (candles.length === 1) {
+            // If only one candle, create 200 ticks with the same value
+            for (let i = 0; i < 200; i++) {
+              interpolatedData.push({
+                time: startTime + (i * 500),
+                value: candles[0].close,
+              });
+            }
+          } else if (candles.length > 1) {
+            for (let i = 0; i < candles.length - 1; i++) {
+              const startCandle = candles[i];
+              const endCandle = candles[i + 1];
+              const timeDiff = endCandle.time - startCandle.time;
+              const valueDiff = endCandle.close - startCandle.close;
+              const steps = timeDiff / 500; // 500ms intervals
+              for (let j = 0; j < steps; j++) {
+                const interpTime = startCandle.time + (j * 500);
+                if (interpTime > endCandle.time) break;
+                const interpValue = startCandle.close + (valueDiff * (j / steps));
+                interpolatedData.push({ time: interpTime, value: interpValue });
+              }
+            }
+            interpolatedData.push({ time: candles[candles.length - 1].time, value: candles[candles.length - 1].close });
+          }
+          return interpolatedData.slice(-200); // Take the last 200 ticks
+        };
+
+        const historicalData = await fetchHistoricalData();
+        const currentTime = Math.floor(Date.now() / 1000);
+        const timeWindowStart = currentTime - TOTAL_TIME_SPAN_S;
+
+        let initialData = historicalData.length > 0 ? historicalData : [{ time: timeWindowStart, value: 96741 }];
+        initialData = initialData.filter(d => typeof d.time === 'number' && !isNaN(d.time) && typeof d.value === 'number' && !isNaN(d.value));
+        if (initialData.length === 0) {
+          console.warn('No valid historical data, using fallback');
+          initialData = [{ time: timeWindowStart, value: 96741 }];
+        }
+
+        console.log('Setting initial data:', initialData);
+        setDisplayedData(initialData);
+
+        // Apply historical data to the chart immediately
+        const validDisplayedData = initialData.filter(
+          d => typeof d.time === 'number' && !isNaN(d.time) && typeof d.value === 'number' && !isNaN(d.value)
+        );
+        const newBaseline = calculateBaseline(validDisplayedData);
+        lastPointTime.current = validDisplayedData[validDisplayedData.length - 1].time;
+
+        if (validDisplayedData.length > 0) {
+          console.log('Applying initial chart data:', validDisplayedData);
+          baselineSeries.current.setData(validDisplayedData);
+          console.log('Applying initial baseline data:', newBaseline);
+          baselineLineSeries.current.setData(newBaseline);
+
+          // Set visible range to include all historical ticks
+          const minTime = Math.min(...validDisplayedData.map(d => d.time));
+          const maxTime = Math.max(...validDisplayedData.map(d => d.time));
+          chartInstance.current.timeScale().setVisibleRange({
+            from: minTime,
+            to: maxTime + (TOTAL_TIME_SPAN_S / 2), // Add buffer to ensure full visibility
+          });
+          console.log('Initial chart data and range applied successfully');
+          renderSync.current += 1;
+        } else {
+          console.warn('No valid displayed data to set on chart during initialization');
+        }
+      } catch (error) {
+        console.error('Initialization error:', error);
       }
     };
 
-    setupChart();
-  }, []);
+    initializeChart();
+  }, [isInitialized, chartInstance, baselineSeries, baselineLineSeries]);
 
   useEffect(() => {
-    console.log('BaselineChart historical ticks useEffect triggered');
-    console.log('Historical ticks received:', historicalTicks);
-    console.log('Number of historical ticks:', historicalTicks?.length || 0);
-    console.log('Historical baseline received:', historicalBaseline);
+    if (!isInitialized.current || !chartInstance.current || !baselineSeries.current || !baselineLineSeries.current || displayedData.length === 0) {
+      console.log('Waiting for data to be applied...', {
+        isInitialized: isInitialized.current,
+        chartInstance: !!chartInstance.current,
+        baselineSeries: !!baselineSeries.current,
+        baselineLineSeries: !!baselineLineSeries.current,
+        displayedDataLength: displayedData.length,
+      });
+      return;
+    }
 
-    if (historicalTicks && historicalTicks.length > 0 && baselineSeries.current) {
-      const currentTime = Math.floor(Date.now() / 1000);
-      const timeWindowStart = currentTime - TOTAL_TIME_SPAN_S;
-      let recentTicks = historicalTicks.filter(
-        tick => tick.time >= timeWindowStart && tick.time <= currentTime
+    const currentTime = Math.floor(Date.now() / 1000);
+    const timeWindowStart = currentTime - TOTAL_TIME_SPAN_S;
+
+    try {
+      const validDisplayedData = displayedData.filter(
+        d => typeof d.time === 'number' && !isNaN(d.time) && typeof d.value === 'number' && !isNaN(d.value)
+      );
+      const validBaselineData = baselineData.filter(
+        d => typeof d.time === 'number' && !isNaN(d.time) && typeof d.value === 'number' && !isNaN(d.value)
       );
 
-      if (recentTicks.length === 0) {
-        console.warn('No ticks within the time window. Using fallback...');
-        const lastTick = historicalTicks[historicalTicks.length - 1];
-        recentTicks = [{ time: currentTime, value: lastTick.value }];
+      if (validDisplayedData.length === 0) {
+        console.warn('No valid displayed data to set on chart');
+        return;
       }
 
-      // Group ticks by second and assign fractional timestamps
-      const ticksBySecond = {};
-      recentTicks.forEach(tick => {
-        const second = Math.floor(tick.time);
-        if (!ticksBySecond[second]) {
-          ticksBySecond[second] = [];
-        }
-        ticksBySecond[second].push(tick);
+      console.log('Applying chart data:', validDisplayedData);
+      baselineSeries.current.setData(validDisplayedData);
+      console.log('Applying baseline data:', validBaselineData);
+      baselineLineSeries.current.setData(validBaselineData);
+      chartInstance.current.timeScale().setVisibleRange({
+        from: timeWindowStart,
+        to: currentTime,
       });
-
-      const adjustedTicks = [];
-      Object.keys(ticksBySecond).sort((a, b) => a - b).forEach(second => {
-        const ticksInSecond = ticksBySecond[second];
-        ticksInSecond.forEach((tick, index) => {
-          // Use a smaller fraction to exaggerate spikiness (e.g., 1/10th of a second)
-          const fraction = ticksInSecond.length > 1 ? (index * 0.1) / (ticksInSecond.length - 1) : 0;
-          const adjustedTime = parseFloat(second) + fraction * TICK_INTERVAL_S;
-          adjustedTicks.push({ time: adjustedTime, value: tick.value });
-        });
-      });
-
-      setDisplayedTicks(() => {
-        const combinedTicks = adjustedTicks
-          .sort((a, b) => a.time - b.time)
-          .slice(-MAX_TICKS * 10); // Allow more ticks for spikiness
-
-        console.log('BaselineChart - Updated displayed ticks with new historical data:', combinedTicks);
-        return combinedTicks;
-      });
-
-      lastUpdateInterval.current = Math.floor(recentTicks[recentTicks.length - 1].time);
-
-      if (historicalBaseline && !isNaN(historicalBaseline)) {
-        baselineValue.current = historicalBaseline;
-        console.log('Updated baseline value to:', baselineValue.current);
-        const baselineData = adjustedTicks.map(tick => ({
-          time: tick.time,
-          value: baselineValue.current,
-        }));
-        baselineLineSeries.current.setData(baselineData);
-      }
-    } else {
-      console.warn('BaselineChart - No historical ticks to apply or series not ready:', {
-        historicalTicks,
-        baselineSeries: baselineSeries.current,
-      });
+      console.log('Chart data and range applied successfully');
+      renderSync.current += 1;
+    } catch (error) {
+      console.error('Error applying chart data:', error);
     }
-  }, [historicalTicks, historicalBaseline]);
+  }, [displayedData, baselineData, isInitialized, chartInstance, baselineSeries, baselineLineSeries]);
 
   useEffect(() => {
-    if (baselineSeries.current && displayedTicks.length > 0) {
-      console.log('BaselineChart - Applying displayed ticks to chart:', displayedTicks);
-      try {
-        const validTicks = displayedTicks.filter(tick => {
-          const isValid = tick.time && !isNaN(tick.time) && tick.value && !isNaN(tick.value);
-          if (!isValid) {
-            console.error('Invalid tick:', tick);
-          }
-          return isValid;
-        });
+    if (!isInitialized.current || !chartInstance.current || !baselineSeries.current || !baselineLineSeries.current) return;
 
-        if (validTicks.length === 0) {
-          console.warn('No valid ticks to display');
+    const setupWebSocket = () => {
+      socketRef.current = io(websocketUrl, {
+        transports: ['websocket'],
+        reconnectionAttempts: 5,
+        reconnectionDelay: 5000,
+      });
+
+      socketRef.current.on('connect', () => console.log('WebSocket connected'));
+      socketRef.current.on('tradeUpdate', (data) => {
+        console.log('Received tradeUpdate from WebSocket:', data);
+
+        if (!data || typeof data.time !== 'number' || typeof data.value !== 'number') {
+          console.error('Invalid trade update:', data);
           return;
         }
 
-        if (validTicks.length > 1) {
-          baselineSeries.current.setData(validTicks.slice(0, -1));
-          baselineSeries.current.update(validTicks[validTicks.length - 1]);
-        } else {
-          baselineSeries.current.setData(validTicks);
-        }
+        const tradeTimeS = data.time;
+        const price = data.value;
+        setCurrentPrice(price);
 
-        const currentTime = Math.floor(Date.now() / 1000);
-        const timeWindowStart = currentTime - TOTAL_TIME_SPAN_S;
-        chartInstance.current.timeScale().setVisibleRange({
-          from: timeWindowStart,
-          to: currentTime,
-        });
-      } catch (error) {
-        console.error('BaselineChart - Error applying displayed ticks to chart:', error);
-      }
-    } else {
-      console.warn('BaselineChart - No displayed ticks to apply or series not ready:', {
-        displayedTicks,
-        baselineSeries: baselineSeries.current,
+        const tradeTimeMs = tradeTimeS * 1000;
+        const currentIntervalS = Math.floor(tradeTimeMs / TICK_INTERVAL_MS) * TICK_INTERVAL_MS / 1000;
+
+        setTimeout(() => {
+          setDisplayedData(prevData => {
+            const currentTime = Date.now() / 1000;
+            const timeWindowStart = currentTime - TOTAL_TIME_SPAN_S;
+            const newData = [...prevData, { time: currentIntervalS, value: price }].sort((a, b) => a.time - b.time);
+            const filteredData = newData.filter(p => p.time >= timeWindowStart && p.time <= currentTime && typeof p.time === 'number' && !isNaN(p.time));
+
+            if (filteredData.length === 0) {
+              console.warn('No filtered data after WebSocket update, using fallback');
+              filteredData.push({ time: timeWindowStart, value: price });
+            }
+
+            const newBaseline = calculateBaseline(filteredData);
+            lastPointTime.current = currentIntervalS;
+
+            if (baselineSeries.current && baselineLineSeries.current && chartInstance.current && renderSync.current > 0) {
+              try {
+                console.log('Applying WebSocket data to chart:', filteredData);
+                baselineSeries.current.setData(filteredData);
+                console.log('Applying WebSocket baseline to chart:', newBaseline);
+                baselineLineSeries.current.setData(newBaseline);
+                chartInstance.current.timeScale().setVisibleRange({
+                  from: timeWindowStart,
+                  to: currentTime,
+                });
+                console.log('WebSocket data applied successfully');
+              } catch (error) {
+                console.error('Error applying WebSocket data:', error);
+              }
+            } else {
+              console.warn('Chart not synced or components not ready during WebSocket update', {
+                baselineSeries: !!baselineSeries.current,
+                baselineLineSeries: !!baselineLineSeries.current,
+                chartInstance: !!chartInstance.current,
+                renderSync: renderSync.current,
+              });
+            }
+
+            return filteredData;
+          });
+        }, 500);
       });
-    }
-  }, [displayedTicks]);
 
-  useEffect(() => {
-    console.log('BaselineChart real-time update useEffect triggered');
-    if (chartData && baselineSeries.current && baselineLineSeries.current) {
-      console.log('BaselineChart - Received chart update with chartData:', chartData);
-      try {
-        const point = { time: chartData.time, value: chartData.value };
-        if (typeof point.time !== 'number' || typeof point.value !== 'number' || isNaN(point.time) || isNaN(point.value)) {
-          console.error('Invalid real-time data point:', point);
-          return;
+      socketRef.current.on('connect_error', (error) => console.error('WebSocket error:', error.message));
+      socketRef.current.on('disconnect', () => console.log('WebSocket disconnected'));
+
+      return () => {
+        if (socketRef.current) {
+          socketRef.current.disconnect();
+          socketRef.current = null;
         }
+      };
+    };
 
-        setBufferedUpdates(prev => [...prev, point]);
-
-        const timeMs = point.time * 1000;
-        const currentIntervalMs = Math.floor(timeMs / TICK_INTERVAL_MS) * TICK_INTERVAL_MS;
-        const currentIntervalS = Math.floor(currentIntervalMs / 1000);
-
-        if (!lastUpdateInterval.current) {
-          lastUpdateInterval.current = currentIntervalS - TICK_INTERVAL_S;
-          console.log('Initialized lastUpdateInterval.current to:', lastUpdateInterval.current);
-        }
-
-        if (currentIntervalS > lastUpdateInterval.current) {
-          console.log(`Processing new interval: ${currentIntervalS}, last update: ${lastUpdateInterval.current}`);
-          const updatesForLastInterval = bufferedUpdates.filter(
-            update => {
-              const updateTimeMs = update.time * 1000;
-              const updateIntervalMs = Math.floor(updateTimeMs / TICK_INTERVAL_MS) * TICK_INTERVAL_MS;
-              const updateIntervalS = Math.floor(updateIntervalMs / 1000);
-              return updateIntervalS === lastUpdateInterval.current;
-            }
-          );
-
-          if (updatesForLastInterval.length > 0) {
-            setDisplayedTicks(prevTicks => {
-              const currentTime = Math.floor(Date.now() / 1000);
-              const timeWindowStart = currentTime - TOTAL_TIME_SPAN_S;
-              const newTicks = updatesForLastInterval.map((update, index) => {
-                // Use a smaller fraction to exaggerate spikiness (e.g., 1/10th of a second)
-                const fraction = updatesForLastInterval.length > 1 ? (index * 0.1) / (updatesForLastInterval.length - 1) : 0;
-                const adjustedTime = lastUpdateInterval.current + (fraction * TICK_INTERVAL_S);
-                return { time: adjustedTime, value: update.value };
-              });
-
-              const filteredTicks = [...prevTicks, ...newTicks]
-                .filter(tick => tick.time >= timeWindowStart)
-                .sort((a, b) => a.time - b.time)
-                .slice(-MAX_TICKS * 10);
-
-              console.log('BaselineChart - Updated displayed ticks with real-time data:', filteredTicks);
-              return filteredTicks;
-            });
-
-            if (chartData.baseline && !isNaN(chartData.baseline)) {
-              baselineValue.current = chartData.baseline;
-              console.log('Updated baseline value to:', baselineValue.current);
-              baselineLineSeries.current.update({
-                time: currentIntervalS,
-                value: chartData.baseline,
-              });
-            }
-          }
-
-          setBufferedUpdates(prev => prev.filter(update => update.time > lastUpdateInterval.current));
-          lastUpdateInterval.current = currentIntervalS;
-        }
-      } catch (error) {
-        console.error('BaselineChart - Error updating chart with real-time data:', error);
-      }
-    }
-  }, [chartData]);
+    const cleanup = setupWebSocket();
+    return cleanup;
+  }, [isInitialized, chartInstance, baselineSeries, baselineLineSeries, websocketUrl]);
 
   return (
     <div className="card bg-gray-900 p-6 shadow-lg rounded-lg">
-      <h3 className="text-xl font-bold text-cyan-400 mb-3">Baseline Chart</h3>
-      <div className="text-sm text-gray-400 mb-2">
-        Current Price: {chartData?.value?.toFixed(2) || 'N/A'} | Baseline: {chartData?.baseline?.toFixed(2) || baselineValue.current?.toFixed(2) || 'N/A'}
-      </div>
+      <h3 className="text-xl font-bold text-cyan-400 mb-3">Baseline Chart (100s historical at 500ms, 1s updates)</h3>
+      <div className="text-sm text-gray-400 mb-2">Current Price: {currentPrice?.toFixed(2) || 'N/A'}</div>
       <div ref={chartRef} style={{ width: '100%', height: '300px' }} />
     </div>
   );

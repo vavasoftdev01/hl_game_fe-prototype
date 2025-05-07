@@ -1,12 +1,13 @@
 import { io } from 'socket.io-client';
 
-// Singleton instance
 let socketInstance = null;
 
 const initSocket = () => {
   if (!socketInstance) {
-    socketInstance = io('http://localhost:8080/hl_price', {
-      transports: ['websocket'],
+    console.log('Attempting to connect to WebSocket server...');
+    socketInstance = io('http://localhost:8080', {
+      transports: ['websocket', 'polling'], // Allow polling as fallback
+      reconnection: true,
       reconnectionDelay: 1000,
       reconnectionAttempts: 10,
       timeout: 10000,
@@ -19,11 +20,16 @@ const initSocket = () => {
     });
 
     socketInstance.on('connect_error', (error) => {
-      console.error('Socket connection error:', error);
+      console.error('Socket connection error:', error.message);
+      console.error('Error details:', error);
     });
 
     socketInstance.on('reconnect_attempt', (attempt) => {
       console.log('Reconnect attempt:', attempt);
+    });
+
+    socketInstance.on('reconnect_failed', () => {
+      console.error('Reconnection failed after maximum attempts');
     });
 
     socketInstance.on('disconnect', (reason) => {
